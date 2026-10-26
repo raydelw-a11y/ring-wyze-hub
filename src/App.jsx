@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 03:12 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 04:10 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -256,20 +256,19 @@ export default function App() {
     );
   }
 
-  // 3. Pantalla Principal del Panel 24/7
+  // 3. Pantalla Principal del Panel 24/7 (4 Cámaras en Pantalla Completa sin Scroll)
   const cameras = hubState?.cameras || [];
   const frontLight = hubState?.front_light || { is_on: false, remaining_seconds: 0 };
   const solar = hubState?.solar || {};
-  const personEvents = hubState?.person_events || [];
 
   return (
     <div className="dashboard">
       <header className="top-bar">
         <div className="brand">
-          <span style={{ fontSize: 22 }}>🏠</span>
+          <span style={{ fontSize: 20 }}>🏠</span>
           <div>
             <h2>Ring + Wyze Smart Hub 24/7</h2>
-            <div style={{ fontSize: 12, color: '#94a3b8' }}>
+            <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
               Filtro exclusivo de personas (IA) • {solar.is_night ? '🌙 Modo Nocturno Activo' : '☀️ Modo Diurno'}{' '}
               {solar.sunset && solar.sunrise ? `(Anochecer ${solar.sunset} / Amanecer ${solar.sunrise})` : ''}
             </div>
@@ -305,24 +304,6 @@ export default function App() {
           />
         ))}
       </main>
-
-      <section className="events-panel">
-        <h3>🚶 Últimas Detecciones de Personas (Movimientos no-humanos ignorados)</h3>
-        <div className="events-list">
-          {personEvents.length === 0 ? (
-            <div className="event-chip">
-              Esperando nueva detección de persona en cualquiera de las cámaras...
-            </div>
-          ) : (
-            personEvents.map((ev, idx) => (
-              <div key={idx} className="event-chip">
-                <strong>{ev.time}</strong> — 🚶 {ev.camera}{' '}
-                {ev.triggered_light ? '💡 (Encendió Front Light)' : ''}
-              </div>
-            ))
-          )}
-        </div>
-      </section>
 
       <div className="build-timestamp-badge">{BUILD_TIMESTAMP}</div>
     </div>
