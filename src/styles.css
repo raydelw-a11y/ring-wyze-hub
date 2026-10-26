@@ -160,6 +160,16 @@ body,
   overflow: hidden;
 }
 
+.dashboard.fullscreen-mode {
+  padding: 4px;
+  gap: 0;
+  cursor: pointer;
+}
+
+.dashboard.fullscreen-mode .cameras-grid {
+  gap: 4px;
+}
+
 .top-bar {
   flex-shrink: 0;
   display: flex;

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 04:55 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 05:11 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -102,7 +102,62 @@ export default function App() {
   const [pendingSecondsLeft, setPendingSecondsLeft] = useState(60);
   const [hubState, setHubState] = useState(null);
   const [togglingPlug, setTogglingPlug] = useState(false);
+  const [isFullscreenMode, setIsFullscreenMode] = useState(false);
+  const enteredFullscreenAtRef = useRef(0);
   const lastSpokenSeqRef = useRef(null);
+
+  const enterFullscreenMode = useCallback((e) => {
+    if (e) e.stopPropagation();
+    enteredFullscreenAtRef.current = Date.now();
+    setIsFullscreenMode(true);
+    try {
+      const el = document.documentElement;
+      if (el.requestFullscreen) {
+        el.requestFullscreen().catch(() => {});
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+      } else if (el.msRequestFullscreen) {
+        el.msRequestFullscreen();
+      }
+    } catch {
+      // Ignorar si el navegador no soporta Fullscreen API nativa (ej. iOS Safari usa el modo 100dvh sin barra superior)
+    }
+  }, []);
+
+  const exitFullscreenMode = useCallback(() => {
+    if (Date.now() - enteredFullscreenAtRef.current < 250) {
+      return;
+    }
+    setIsFullscreenMode(false);
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        if (document.exitFullscreen) {
+          document.exitFullscreen().catch(() => {});
+        } else if (document.webkitExitFullscreen) {
+          document.webkitExitFullscreen();
+        }
+      }
+    } catch {
+      // Ignorar
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const fsActive = Boolean(
+        document.fullscreenElement || document.webkitFullscreenElement
+      );
+      if (!fsActive && Date.now() - enteredFullscreenAtRef.current > 400) {
+        setIsFullscreenMode(false);
+      }
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    document.addEventListener('webkitfullscreenchange', onFsChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      document.removeEventListener('webkitfullscreenchange', onFsChange);
+    };
+  }, []);
 
   // Precargar voces del navegador y desbloquear síntesis al primer toque en la pantalla de la Tablet
   useEffect(() => {
@@ -401,47 +456,61 @@ export default function App() {
   const solar = hubState?.solar || {};
 
   return (
-    <div className="dashboard">
-      <header className="top-bar">
-        <div className="brand">
-          <span style={{ fontSize: 20 }}>📹</span>
-          <div>
-            <h2>Mis Camaras</h2>
-            <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
-              Filtro exclusivo de personas (IA) • {solar.is_night ? '🌙 Modo Nocturno Activo' : '☀️ Modo Diurno'}{' '}
-              {solar.sunset && solar.sunrise ? `(Anochecer ${solar.sunset} / Amanecer ${solar.sunrise})` : ''}
+    <div
+      className={`dashboard ${isFullscreenMode ? 'fullscreen-mode' : ''}`}
+      onClick={isFullscreenMode ? exitFullscreenMode : undefined}
+    >
+      {!isFullscreenMode && (
+        <header className="top-bar">
+          <div className="brand">
+            <span style={{ fontSize: 20 }}>📹</span>
+            <div>
+              <h2>Mis Camaras</h2>
+              <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
+                Filtro exclusivo de personas (IA) • {solar.is_night ? '🌙 Modo Nocturno Activo' : '☀️ Modo Diurno'}{' '}
+                {solar.sunset && solar.sunrise ? `(Anochecer ${solar.sunset} / Amanecer ${solar.sunrise})` : ''}
+              </div>
             </div>
           </div>
-        </div>
 
-        <div className="status-pills">
-          <button
-            type="button"
-            onClick={() => speakSpanishAlert('Hay una persona en el driveway')}
-            className="toggle-btn"
-            title="Probar y activar voz en español en la Tablet"
-          >
-            🔊 Probar Voz Tablet
-          </button>
+          <div className="status-pills">
+            <button
+              type="button"
+              onClick={enterFullscreenMode}
+              className="toggle-btn"
+              title="Poner las 4 cámaras en pantalla completa (toca cualquier parte para salir)"
+            >
+              ⛶ Pantalla Completa
+            </button>
 
-          <div className={`pill ${frontLight.is_on ? 'light-on' : 'online'}`}>
-            <span>💡 Front Light Plug:</span>
-            <strong>{frontLight.is_on ? 'ENCENDIDO' : 'APAGADO'}</strong>
-            {frontLight.is_on && frontLight.remaining_seconds > 0 && (
-              <span>({frontLight.remaining_seconds}s)</span>
-            )}
+            <button
+              type="button"
+              onClick={() => speakSpanishAlert('Hay una persona en el driveway')}
+              className="toggle-btn"
+              title="Probar y activar voz en español en la Tablet"
+            >
+              🔊 Probar Voz Tablet
+            </button>
+
+            <div className={`pill ${frontLight.is_on ? 'light-on' : 'online'}`}>
+              <span>💡 Front Light Plug:</span>
+              <strong>{frontLight.is_on ? 'ENCENDIDO' : 'APAGADO'}</strong>
+              {frontLight.is_on && frontLight.remaining_seconds > 0 && (
+                <span>({frontLight.remaining_seconds}s)</span>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={handleToggleFrontLight}
+              disabled={togglingPlug}
+              className={`toggle-btn ${frontLight.is_on ? 'active' : ''}`}
+            >
+              {frontLight.is_on ? 'Apagar Luz' : 'Encender 1 min'}
+            </button>
           </div>
-
-          <button
-            type="button"
-            onClick={handleToggleFrontLight}
-            disabled={togglingPlug}
-            className={`toggle-btn ${frontLight.is_on ? 'active' : ''}`}
-          >
-            {frontLight.is_on ? 'Apagar Luz' : 'Encender 1 min'}
-          </button>
-        </div>
-      </header>
+        </header>
+      )}
 
       <main className="cameras-grid">
         {cameras.map((cam) => (

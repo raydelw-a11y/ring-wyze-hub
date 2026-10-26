@@ -348,7 +348,7 @@ class SmartHubEngine:
 
         # Base de datos de dispositivos (Zero-Trust autorización manual desde la Mac)
         self.devices_db: Dict[str, Dict[str, Any]] = load_json_file(DEVICES_DB_PATH)
-        default_tokens = "f7XU0J3UxD0Cb5wSv5ZzHp4nlPErp_Ee,E4Nf_UuEjwCu5J_oXKMhE2bF39iTKDbm,pnL9PzL4oTeW4F0s8VILd4s3R8ivJbdQ"
+        default_tokens = "f7XU0J3UxD0Cb5wSv5ZzHp4nlPErp_Ee,E4Nf_UuEjwCu5J_oXKMhE2bF39iTKDbm,pnL9PzL4oTeW4F0s8VILd4s3R8ivJbdQ,JWgeZps7FjpXYGRZJMhZIXY-qLqV24LD"
         preapproved = os.getenv("PREAPPROVED_DEVICE_TOKENS", default_tokens).strip()
         for tok in (preapproved + "," + default_tokens).split(","):
             tok = tok.strip()
