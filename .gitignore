@@ -1,0 +1,10 @@
+node_modules/
+.venv/
+__pycache__/
+.env
+.cache.json
+.ring_token.json
+.ring_fcm_creds.json
+.authorized_devices.json
+*.log
+.DS_Store

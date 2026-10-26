@@ -1,0 +1,4 @@
+aiohttp>=3.10.0
+python-dotenv>=1.0.0
+ring-doorbell>=0.9.13
+wyze-sdk>=2.2.0
