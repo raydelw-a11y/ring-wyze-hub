@@ -18,6 +18,7 @@ import math
 import os
 import random
 import secrets
+import shutil
 import sys
 import time
 import warnings
@@ -246,6 +247,17 @@ def format_entry_local_datetime(entry: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def get_ffmpeg_binary() -> str:
+    sys_ff = shutil.which("ffmpeg")
+    if sys_ff:
+        return sys_ff
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def is_human_history_entry(entry: Dict[str, Any], max_age_seconds: float = 90.0) -> bool:
     created_raw = entry.get("created_at")
     if created_raw:
@@ -395,9 +407,106 @@ class SmartHubEngine:
         except Exception as exc:
             logger.warning("No se pudo sincronizar aviso nocturno de Driveway Cam: %s", exc)
 
+    async def fetch_last_human_event_snapshot(
+        self, cam_id: int, entry: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Obtiene el fotograma JPEG exacto del último evento de detección de PERSONA (human)
+        guardado por Ring para esta cámara, para que siempre muestre la captura de la
+        última persona detectada hasta que ocurra la siguiente detección de persona.
+        """
+        dev = self.cameras_by_id.get(cam_id)
+        if not dev:
+            return False
+        try:
+            if entry is None:
+                hist = await dev.async_history(limit=25)
+                for h in hist:
+                    if is_any_human_entry(h) and (h.get("recording") or {}).get("status") == "ready":
+                        entry = h
+                        break
+            if not entry or not entry.get("id"):
+                return False
+
+            rec_url = await dev.async_recording_url(entry["id"])
+            if not rec_url:
+                return False
+
+            offset_sec = 2.0
+            try:
+                c_raw = entry.get("created_at")
+                if c_raw:
+                    dt = (
+                        datetime.fromisoformat(str(c_raw).replace("Z", "+00:00"))
+                        if isinstance(c_raw, str)
+                        else c_raw
+                    )
+                    start_ms = dt.timestamp() * 1000.0
+                    cv = entry.get("cv_properties") or {}
+                    for dt_item in cv.get("detection_types") or []:
+                        if (dt_item.get("detection_type") or "").lower() in ("human", "person"):
+                            vts = dt_item.get("verified_timestamps") or []
+                            if vts:
+                                diff = (vts[0] - start_ms) / 1000.0
+                                if 0.0 <= diff <= 25.0:
+                                    offset_sec = max(1.5, diff + 0.8)
+                                break
+            except Exception:
+                pass
+
+            cmd = [
+                get_ffmpeg_binary(),
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{offset_sec:.2f}",
+                "-i",
+                rec_url,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=960:-1",
+                "-q:v",
+                "4",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "mjpeg",
+                "-",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=18.0)
+            if stdout and len(stdout) > 500:
+                self.snapshots[cam_id] = stdout
+                self.snapshot_content_type[cam_id] = "image/jpeg"
+                if cam_id in self.camera_states:
+                    self.camera_states[cam_id]["snapshot_version"] += 1
+                    ts_str = format_entry_local_datetime(entry)
+                    if ts_str:
+                        self.camera_states[cam_id]["last_person_time"] = ts_str
+                logger.info(
+                    "🚶📷 Fotograma de última persona cargado para '%s' (evento=%s, %d bytes)",
+                    dev.name,
+                    entry.get("id"),
+                    len(stdout),
+                )
+                return True
+        except Exception as exc:
+            logger.warning(
+                "No se pudo extraer fotograma de persona del historial de '%s': %s",
+                dev.name,
+                exc,
+            )
+        return False
+
     async def fetch_camera_snapshot(self, cam_id: int, request_fresh: bool = False) -> bool:
         """
-        Descarga el snapshot de UNA cámara específica y aumenta su snapshot_version.
+        Descarga el snapshot en vivo de UNA cámara específica y aumenta su snapshot_version.
         Las demás cámaras no se tocan.
         """
         if not self.ring or cam_id not in self.cameras_by_id:
@@ -418,7 +527,7 @@ class SmartHubEngine:
                     if cam_id in self.camera_states:
                         self.camera_states[cam_id]["snapshot_version"] += 1
                     logger.info(
-                        "📷 Snapshot actualizado para '%s' (v=%d, %d bytes)",
+                        "📷 Snapshot en vivo actualizado para '%s' (v=%d, %d bytes)",
                         self.camera_states[cam_id]["name"],
                         self.camera_states[cam_id]["snapshot_version"],
                         len(resp.content),
@@ -431,12 +540,15 @@ class SmartHubEngine:
     async def _refresh_person_snapshot_sequence(self, cam_id: int) -> None:
         """
         Cuando una cámara detecta una PERSONA, actualiza SOLO el snapshot de esa cámara:
-        1) Pide captura fresca inmediata (+2.0s)
-        2) Pide una segunda captura (+5s) mientras la persona está frente a la cámara
+        1) Pide captura fresca inmediata (+2.0s) y (+6.0s)
+        2) A los +16s extrae también el fotograma exacto de la grabación de esa persona
+           por si la cámara (como Yard Cam) no soporta snapshots en vivo.
         """
         await self.fetch_camera_snapshot(cam_id, request_fresh=True)
         await asyncio.sleep(4.0)
         await self.fetch_camera_snapshot(cam_id, request_fresh=True)
+        await asyncio.sleep(12.0)
+        await self.fetch_last_human_event_snapshot(cam_id)
 
     async def handle_person_detected(
         self, cam_id: int, cam_name: str, source: str, sigs: Optional[List[str]] = None
@@ -565,6 +677,7 @@ class SmartHubEngine:
         unique_cams.sort(key=lambda c: order_map.get(c.name.strip().lower(), 99))
 
         base_ver = int(time.time())
+        last_human_entries: Dict[int, Dict[str, Any]] = {}
         for cam in unique_cams:
             self.cameras_by_id[cam.id] = cam
             self.camera_states[cam.id] = {
@@ -580,16 +693,18 @@ class SmartHubEngine:
             self.snapshot_content_type[cam.id] = "image/svg+xml"
 
             # Pre-cargar historial existente para no disparar por eventos pasados
-            # y obtener la fecha/hora de la última detección de persona en esa cámara
+            # y localizar el último evento de detección de PERSONA en esa cámara
             try:
-                hist = await cam.async_history(limit=15)
+                hist = await cam.async_history(limit=25)
                 for entry in hist:
                     for s in extract_human_signatures(entry):
                         self.seen_signatures.add(s)
                     if (
-                        self.camera_states[cam.id]["last_person_time"] is None
+                        cam.id not in last_human_entries
                         and is_any_human_entry(entry)
+                        and (entry.get("recording") or {}).get("status") == "ready"
                     ):
+                        last_human_entries[cam.id] = entry
                         self.camera_states[cam.id]["last_person_time"] = (
                             format_entry_local_datetime(entry)
                         )
@@ -600,15 +715,21 @@ class SmartHubEngine:
             except Exception:
                 pass
 
-        # Descargar el snapshot inicial una sola vez por cada cámara al arrancar
+        # Cargar el snapshot de la ÚLTIMA DETECCIÓN DE PERSONA por cada cámara al arrancar
         for cam_id in self.cameras_by_id:
-            await self.fetch_camera_snapshot(cam_id, request_fresh=False)
+            loaded = await self.fetch_last_human_event_snapshot(
+                cam_id, last_human_entries.get(cam_id)
+            )
+            if not loaded:
+                await self.fetch_camera_snapshot(cam_id, request_fresh=False)
 
     async def poll_history_for_persons(self) -> None:
         for cam_id, dev in self.cameras_by_id.items():
             # Si alguna cámara aún no tiene un JPEG real cargado, reintentar automáticamente
             if self.snapshot_content_type.get(cam_id) != "image/jpeg":
-                await self.fetch_camera_snapshot(cam_id, request_fresh=True)
+                loaded = await self.fetch_last_human_event_snapshot(cam_id)
+                if not loaded:
+                    await self.fetch_camera_snapshot(cam_id, request_fresh=True)
 
             try:
                 hist = await dev.async_history(limit=2)
