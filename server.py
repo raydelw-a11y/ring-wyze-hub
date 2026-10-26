@@ -221,6 +221,31 @@ def set_front_light_plug(turn_on: bool) -> bool:
     return False
 
 
+def is_any_human_entry(entry: Dict[str, Any]) -> bool:
+    cv = entry.get("cv_properties") or {}
+    det_type = (cv.get("detection_type") or "").strip().lower()
+    if det_type in ("human", "person") or cv.get("person_detected") is True:
+        return True
+    for dt in cv.get("detection_types") or []:
+        if (dt.get("detection_type") or "").strip().lower() in ("human", "person"):
+            return True
+    return False
+
+
+def format_entry_local_datetime(entry: Dict[str, Any]) -> Optional[str]:
+    created_raw = entry.get("created_at")
+    if not created_raw:
+        return None
+    try:
+        if isinstance(created_raw, str):
+            dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        else:
+            dt = created_raw
+        return dt.astimezone(LOCAL_TZ).strftime("%I:%M:%S %p - %m/%d/%Y")
+    except Exception:
+        return None
+
+
 def is_human_history_entry(entry: Dict[str, Any], max_age_seconds: float = 90.0) -> bool:
     created_raw = entry.get("created_at")
     if created_raw:
@@ -377,35 +402,36 @@ class SmartHubEngine:
         """
         if not self.ring or cam_id not in self.cameras_by_id:
             return False
-        try:
-            if request_fresh:
-                payload = {"doorbot_ids": [cam_id]}
-                await self.ring.async_query(
-                    SNAPSHOT_TIMESTAMP_ENDPOINT, method="POST", json=payload
-                )
-                await asyncio.sleep(1.5)
+        for attempt in (1, 2):
+            try:
+                if request_fresh or attempt == 2:
+                    payload = {"doorbot_ids": [cam_id]}
+                    await self.ring.async_query(
+                        SNAPSHOT_TIMESTAMP_ENDPOINT, method="POST", json=payload
+                    )
+                    await asyncio.sleep(2.0)
 
-            resp = await self.ring.async_query(SNAPSHOT_ENDPOINT.format(cam_id))
-            if resp.status_code == 200 and resp.content and len(resp.content) > 500:
-                self.snapshots[cam_id] = resp.content
-                self.snapshot_content_type[cam_id] = "image/jpeg"
-                if cam_id in self.camera_states:
-                    self.camera_states[cam_id]["snapshot_version"] += 1
-                logger.info(
-                    "📷 Snapshot actualizado para '%s' (v=%d, %d bytes)",
-                    self.camera_states[cam_id]["name"],
-                    self.camera_states[cam_id]["snapshot_version"],
-                    len(resp.content),
-                )
-                return True
-        except Exception as exc:
-            logger.warning("No se pudo actualizar snapshot de cámara %s: %s", cam_id, exc)
+                resp = await self.ring.async_query(SNAPSHOT_ENDPOINT.format(cam_id))
+                if resp.status_code == 200 and resp.content and len(resp.content) > 500:
+                    self.snapshots[cam_id] = resp.content
+                    self.snapshot_content_type[cam_id] = "image/jpeg"
+                    if cam_id in self.camera_states:
+                        self.camera_states[cam_id]["snapshot_version"] += 1
+                    logger.info(
+                        "📷 Snapshot actualizado para '%s' (v=%d, %d bytes)",
+                        self.camera_states[cam_id]["name"],
+                        self.camera_states[cam_id]["snapshot_version"],
+                        len(resp.content),
+                    )
+                    return True
+            except Exception as exc:
+                logger.warning("Intento %d falló al actualizar snapshot de cámara %s: %s", attempt, cam_id, exc)
         return False
 
     async def _refresh_person_snapshot_sequence(self, cam_id: int) -> None:
         """
         Cuando una cámara detecta una PERSONA, actualiza SOLO el snapshot de esa cámara:
-        1) Pide captura fresca inmediata (+1.5s)
+        1) Pide captura fresca inmediata (+2.0s)
         2) Pide una segunda captura (+5s) mientras la persona está frente a la cámara
         """
         await self.fetch_camera_snapshot(cam_id, request_fresh=True)
@@ -419,7 +445,7 @@ class SmartHubEngine:
             for s in sigs:
                 self.seen_signatures.add(s)
 
-        now_local_str = datetime.now(LOCAL_TZ).strftime("%I:%M:%S %p")
+        now_local_str = datetime.now(LOCAL_TZ).strftime("%I:%M:%S %p - %m/%d/%Y")
         now_mono = time.monotonic()
 
         # 1. Marcar actividad de persona en ESTA cámara específica y actualizar SOLO su snapshot
@@ -538,6 +564,7 @@ class SmartHubEngine:
                 unique_cams.append(cam)
         unique_cams.sort(key=lambda c: order_map.get(c.name.strip().lower(), 99))
 
+        base_ver = int(time.time())
         for cam in unique_cams:
             self.cameras_by_id[cam.id] = cam
             self.camera_states[cam.id] = {
@@ -545,7 +572,7 @@ class SmartHubEngine:
                 "name": cam.name,
                 "kind": cam.kind,
                 "triggers_front_light": self.triggers_front_light(cam.name),
-                "snapshot_version": 1,
+                "snapshot_version": base_ver,
                 "last_person_time": None,
                 "person_active_until": 0.0,
             }
@@ -553,11 +580,23 @@ class SmartHubEngine:
             self.snapshot_content_type[cam.id] = "image/svg+xml"
 
             # Pre-cargar historial existente para no disparar por eventos pasados
+            # y obtener la fecha/hora de la última detección de persona en esa cámara
             try:
-                hist = await cam.async_history(limit=5)
+                hist = await cam.async_history(limit=15)
                 for entry in hist:
                     for s in extract_human_signatures(entry):
                         self.seen_signatures.add(s)
+                    if (
+                        self.camera_states[cam.id]["last_person_time"] is None
+                        and is_any_human_entry(entry)
+                    ):
+                        self.camera_states[cam.id]["last_person_time"] = (
+                            format_entry_local_datetime(entry)
+                        )
+                if self.camera_states[cam.id]["last_person_time"] is None and hist:
+                    self.camera_states[cam.id]["last_person_time"] = (
+                        format_entry_local_datetime(hist[0])
+                    )
             except Exception:
                 pass
 
@@ -567,6 +606,10 @@ class SmartHubEngine:
 
     async def poll_history_for_persons(self) -> None:
         for cam_id, dev in self.cameras_by_id.items():
+            # Si alguna cámara aún no tiene un JPEG real cargado, reintentar automáticamente
+            if self.snapshot_content_type.get(cam_id) != "image/jpeg":
+                await self.fetch_camera_snapshot(cam_id, request_fresh=True)
+
             try:
                 hist = await dev.async_history(limit=2)
                 for entry in hist:
@@ -770,10 +813,15 @@ async def api_camera_snapshot(request: web.Request) -> web.Response:
         return web.Response(status=404, text="Snapshot no encontrado")
 
     ctype = engine.snapshot_content_type.get(cam_id, "image/jpeg")
+    cache_hdr = (
+        "private, max-age=86400"
+        if ctype == "image/jpeg"
+        else "no-store, no-cache, must-revalidate"
+    )
     return web.Response(
         body=img_bytes,
         content_type=ctype,
-        headers={"Cache-Control": "private, max-age=86400"},
+        headers={"Cache-Control": cache_hdr},
     )
 
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 04:34 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 04:40 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -76,25 +76,14 @@ const CameraCard = React.memo(function CameraCard({ cam, deviceToken, isNight })
           )}
         </div>
         <div>
-          {cam.person_active ? (
-            <span className="person-badge">🚶 PERSONA DETECTADA</span>
-          ) : (
-            <span className="camera-meta">
-              {cam.last_person_time
-                ? `Última persona: ${cam.last_person_time}`
-                : 'Sin detección reciente'}
-            </span>
-          )}
+          <span className="person-badge">
+            🚶 PERSONA DETECTADA{cam.last_person_time ? ` • ${cam.last_person_time}` : ''}
+          </span>
         </div>
       </div>
 
       <div className="camera-Viewport">
         <img src={imgUrl} alt={cam.name} loading="eager" />
-        <div className="snapshot-overlay-info">
-          {cam.last_person_time
-            ? `🚶 Captura de persona: ${cam.last_person_time}`
-            : '📷 Snapshot base (solo cambia al detectar persona)'}
-        </div>
       </div>
     </div>
   );
