@@ -609,7 +609,7 @@ class SmartHubEngine:
         last_poll = time.monotonic()
         last_solar_sync = time.monotonic()
         last_keepalive = time.monotonic()
-        public_url = os.getenv("RENDER_EXTERNAL_URL", "https://ring-wyze-hub.onrender.com").rstrip("/")
+        public_url = os.getenv("RENDER_EXTERNAL_URL", "https://miscamaras.onrender.com").rstrip("/")
         while True:
             try:
                 now_mono = time.monotonic()
