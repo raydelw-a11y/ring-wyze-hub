@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 04:45 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 04:47 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -76,7 +76,7 @@ const CameraCard = React.memo(function CameraCard({ cam, deviceToken, isNight })
           )}
         </div>
         <div>
-          <span className="person-badge">
+          <span className={cam.person_active ? 'person-badge' : 'camera-meta'}>
             🚶 PERSONA DETECTADA{cam.last_person_time ? ` • ${cam.last_person_time}` : ''}
           </span>
         </div>

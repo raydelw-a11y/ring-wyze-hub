@@ -448,10 +448,10 @@ class SmartHubEngine:
         now_local_str = datetime.now(LOCAL_TZ).strftime("%I:%M:%S %p - %m/%d/%Y")
         now_mono = time.monotonic()
 
-        # 1. Marcar actividad de persona en ESTA cámara específica y actualizar SOLO su snapshot
+        # 1. Marcar actividad de persona en ESTA cámara específica por 1 minuto (60s) y actualizar SOLO su snapshot
         if cam_id in self.camera_states:
             self.camera_states[cam_id]["last_person_time"] = now_local_str
-            self.camera_states[cam_id]["person_active_until"] = now_mono + 25.0
+            self.camera_states[cam_id]["person_active_until"] = now_mono + 60.0
             asyncio.create_task(self._refresh_person_snapshot_sequence(cam_id))
 
         # 2. Si es Front Door o Driveway Cam y estamos entre anochecer y amanecer -> encender Front Light Plug
