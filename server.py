@@ -557,6 +557,8 @@ class SmartHubEngine:
             self.listener = None
 
         last_poll = time.monotonic()
+        last_keepalive = time.monotonic()
+        public_url = os.getenv("RENDER_EXTERNAL_URL", "https://ring-wyze-hub.onrender.com").rstrip("/")
         while True:
             try:
                 now_mono = time.monotonic()
@@ -572,6 +574,15 @@ class SmartHubEngine:
                 if (now_mono - last_poll) >= poll_interval:
                     last_poll = now_mono
                     await self.poll_history_for_persons()
+
+                # Auto-keepalive cada 9 minutos para que Render Free nunca entre en spin-down de madrugada
+                if (now_mono - last_keepalive) >= 540.0:
+                    last_keepalive = now_mono
+                    try:
+                        async with self.auth._session.get(f"{public_url}/api/health", timeout=8) as _:
+                            pass
+                    except Exception:
+                        pass
             except asyncio.CancelledError:
                 break
             except Exception as exc:

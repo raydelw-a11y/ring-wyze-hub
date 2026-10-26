@@ -34,7 +34,7 @@ def load_env() -> dict:
 
 def main() -> None:
     env = load_env()
-    server_url = os.getenv("HUB_URL", env.get("HUB_URL", "http://localhost:8080")).rstrip("/")
+    server_url = os.getenv("HUB_URL", env.get("HUB_URL", "https://ring-wyze-hub.onrender.com")).rstrip("/")
     admin_key = os.getenv(
         "MAC_ADMIN_KEY", env.get("MAC_ADMIN_KEY", "raydel-mac-secret-key-2026")
     )
