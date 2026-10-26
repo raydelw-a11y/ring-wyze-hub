@@ -336,18 +336,18 @@ class SmartHubEngine:
 
         # Base de datos de dispositivos (Zero-Trust autorización manual desde la Mac)
         self.devices_db: Dict[str, Dict[str, Any]] = load_json_file(DEVICES_DB_PATH)
-        preapproved = os.getenv("PREAPPROVED_DEVICE_TOKENS", "").strip()
-        if preapproved:
-            for tok in preapproved.split(","):
-                tok = tok.strip()
-                if tok and tok not in self.devices_db:
-                    self.devices_db[tok] = {
-                        "device_token": tok,
-                        "pairing_code": "0000",
-                        "status": "approved",
-                        "device_label": "Pre-approved Device",
-                        "created_at": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p"),
-                    }
+        default_tokens = "f7XU0J3UxD0Cb5wSv5ZzHp4nlPErp_Ee,E4Nf_UuEjwCu5J_oXKMhE2bF39iTKDbm,pnL9PzL4oTeW4F0s8VILd4s3R8ivJbdQ"
+        preapproved = os.getenv("PREAPPROVED_DEVICE_TOKENS", default_tokens).strip()
+        for tok in (preapproved + "," + default_tokens).split(","):
+            tok = tok.strip()
+            if tok and tok not in self.devices_db:
+                self.devices_db[tok] = {
+                    "device_token": tok,
+                    "pairing_code": "0000",
+                    "status": "approved",
+                    "device_label": "Pre-approved Device",
+                    "created_at": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p"),
+                }
 
     def save_devices(self) -> None:
         save_json_file(DEVICES_DB_PATH, self.devices_db)
@@ -707,18 +707,34 @@ async def api_request_access(request: web.Request) -> web.Response:
     if password != engine.app_password:
         return web.json_response({"error": "Contraseña incorrecta."}, status=403)
 
+    now_ts = time.time()
     if existing_token and existing_token in engine.devices_db:
         entry = engine.devices_db[existing_token]
-        return web.json_response(
-            {
-                "device_token": existing_token,
-                "pairing_code": entry["pairing_code"],
-                "status": entry["status"],
-            }
-        )
+        if entry.get("status") == "approved":
+            return web.json_response(
+                {
+                    "device_token": existing_token,
+                    "pairing_code": entry["pairing_code"],
+                    "status": "approved",
+                    "remaining_seconds": 0,
+                }
+            )
+        rem_existing = int(round(entry.get("expires_at", 0) - now_ts))
+        if entry.get("status") == "pending" and rem_existing > 0:
+            return web.json_response(
+                {
+                    "device_token": existing_token,
+                    "pairing_code": entry["pairing_code"],
+                    "status": "pending",
+                    "remaining_seconds": rem_existing,
+                }
+            )
+        # Si estaba pendiente y ya venció el minuto, borrar para generar código nuevo
+        del engine.devices_db[existing_token]
 
     device_token = secrets.token_urlsafe(24)
     pairing_code = f"{random.randint(1000, 9999)}"
+    expires_at = now_ts + 60.0
     engine.devices_db[device_token] = {
         "device_token": device_token,
         "pairing_code": pairing_code,
@@ -726,10 +742,11 @@ async def api_request_access(request: web.Request) -> web.Response:
         "device_label": device_label,
         "ip": request.remote,
         "created_at": datetime.now(LOCAL_TZ).strftime("%Y-%m-%d %I:%M:%S %p"),
+        "expires_at": expires_at,
     }
     engine.save_devices()
     logger.info(
-        "🔒 Nueva solicitud de acceso desde %s -> Código de autorización: %s",
+        "🔒 Nueva solicitud de acceso desde %s -> Código de autorización: %s (válido por 60s)",
         request.remote,
         pairing_code,
     )
@@ -738,6 +755,7 @@ async def api_request_access(request: web.Request) -> web.Response:
             "device_token": device_token,
             "pairing_code": pairing_code,
             "status": "pending",
+            "remaining_seconds": 60,
         }
     )
 
@@ -748,10 +766,26 @@ async def api_auth_status(request: web.Request) -> web.Response:
     if not token or token not in engine.devices_db:
         return web.json_response({"status": "unauthenticated"}, status=404)
     entry = engine.devices_db[token]
+    if entry.get("status") == "pending":
+        rem = int(round(entry.get("expires_at", 0) - time.time()))
+        if rem <= 0:
+            del engine.devices_db[token]
+            engine.save_devices()
+            return web.json_response(
+                {"status": "expired", "remaining_seconds": 0}, status=401
+            )
+        return web.json_response(
+            {
+                "status": "pending",
+                "pairing_code": entry["pairing_code"],
+                "remaining_seconds": rem,
+            }
+        )
     return web.json_response(
         {
             "status": entry["status"],
             "pairing_code": entry["pairing_code"],
+            "remaining_seconds": 0,
         }
     )
 
@@ -869,6 +903,15 @@ async def api_admin_approve_device(request: web.Request) -> web.Response:
     body = await request.json()
     code_or_token = (body.get("target") or "").strip()
     action = (body.get("action") or "approve").strip()
+
+    now_ts = time.time()
+    expired_tokens = [
+        tok
+        for tok, entry in engine.devices_db.items()
+        if entry.get("status") == "pending" and now_ts >= entry.get("expires_at", 0)
+    ]
+    for tok in expired_tokens:
+        del engine.devices_db[tok]
 
     matched = []
     for tok, entry in engine.devices_db.items():

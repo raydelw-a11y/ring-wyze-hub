@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 04:40 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 04:45 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -99,6 +99,7 @@ export default function App() {
     () => localStorage.getItem('rw_pairing_code') || ''
   );
   const [authStatus, setAuthStatus] = useState('checking'); // 'unauthenticated' | 'pending' | 'approved'
+  const [pendingSecondsLeft, setPendingSecondsLeft] = useState(60);
   const [hubState, setHubState] = useState(null);
   const [togglingPlug, setTogglingPlug] = useState(false);
   const lastSpokenSeqRef = useRef(null);
@@ -139,11 +140,15 @@ export default function App() {
         `/api/auth/status?token=${encodeURIComponent(tokenToCheck)}`
       );
       if (res.status === 401 || res.status === 404) {
+        const wasPending = authStatus === 'pending';
         localStorage.removeItem('rw_device_token');
         localStorage.removeItem('rw_pairing_code');
         setDeviceToken('');
         setPairingCode('');
         setAuthStatus('unauthenticated');
+        if (wasPending) {
+          setAuthError('⏱️ El tiempo de 1 minuto expiró. Ingresa la contraseña nuevamente.');
+        }
         return;
       }
       const data = await res.json();
@@ -151,6 +156,9 @@ export default function App() {
         setAuthStatus('approved');
       } else if (data.status === 'pending') {
         setPairingCode(data.pairing_code || '');
+        if (typeof data.remaining_seconds === 'number') {
+          setPendingSecondsLeft(data.remaining_seconds);
+        }
         setAuthStatus('pending');
       } else {
         setAuthStatus('unauthenticated');
@@ -158,19 +166,36 @@ export default function App() {
     } catch {
       // Si hay corte momentáneo de red, mantener estado actual
     }
-  }, []);
+  }, [authStatus]);
 
   useEffect(() => {
     checkDeviceStatus(deviceToken);
   }, [deviceToken, checkDeviceStatus]);
 
-  // Si está pendiente de autorización desde la Mac, consultar cada 2s
+  // Si está pendiente de autorización desde la Mac, consultar cada 2s y descontar cada 1s (máx 60s)
   useEffect(() => {
     if (authStatus !== 'pending' || !deviceToken) return;
-    const timer = setInterval(() => {
+    const pollTimer = setInterval(() => {
       checkDeviceStatus(deviceToken);
     }, 2000);
-    return () => clearInterval(timer);
+    const countdownTimer = setInterval(() => {
+      setPendingSecondsLeft((prev) => {
+        if (prev <= 1) {
+          localStorage.removeItem('rw_device_token');
+          localStorage.removeItem('rw_pairing_code');
+          setDeviceToken('');
+          setPairingCode('');
+          setAuthStatus('unauthenticated');
+          setAuthError('⏱️ El tiempo de 1 minuto expiró. Ingresa la contraseña nuevamente.');
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => {
+      clearInterval(pollTimer);
+      clearInterval(countdownTimer);
+    };
   }, [authStatus, deviceToken, checkDeviceStatus]);
 
   // Una vez autorizado, consultar el estado ligero (JSON ~300 bytes) cada 2s
@@ -239,6 +264,7 @@ export default function App() {
       localStorage.setItem('rw_pairing_code', data.pairing_code);
       setDeviceToken(data.device_token);
       setPairingCode(data.pairing_code);
+      setPendingSecondsLeft(data.remaining_seconds || 60);
       setAuthStatus(data.status);
     } catch {
       setAuthError('No se pudo conectar con el servidor.');
@@ -313,8 +339,9 @@ export default function App() {
     );
   }
 
-  // 2. Pantalla de Espera de Autorización Manual desde la Mac
+  // 2. Pantalla de Espera de Autorización Manual desde la Mac (Con temporizador de 1 minuto)
   if (authStatus === 'pending') {
+    const pct = Math.max(0, Math.min(100, (pendingSecondsLeft / 60) * 100));
     return (
       <div className="auth-screen">
         <div className="auth-card">
@@ -328,6 +355,35 @@ export default function App() {
               CÓDIGO DE ESTE DISPOSITIVO
             </div>
             <div className="pairing-code">{pairingCode}</div>
+            <div
+              style={{
+                marginTop: 10,
+                fontSize: 13,
+                fontWeight: 700,
+                color: pendingSecondsLeft <= 15 ? '#f87171' : '#38bdf8',
+              }}
+            >
+              ⏱️ Tiempo para autorizar: {pendingSecondsLeft}s
+            </div>
+            <div
+              style={{
+                marginTop: 8,
+                height: 5,
+                width: '100%',
+                background: '#1e293b',
+                borderRadius: 999,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  height: '100%',
+                  width: `${pct}%`,
+                  background: pendingSecondsLeft <= 15 ? '#ef4444' : '#38bdf8',
+                  transition: 'width 1s linear, background-color 0.3s',
+                }}
+              />
+            </div>
           </div>
           <p style={{ marginBottom: 8 }}>
             Ejecuta en tu Mac para autorizar esta pantalla:
@@ -348,9 +404,9 @@ export default function App() {
     <div className="dashboard">
       <header className="top-bar">
         <div className="brand">
-          <span style={{ fontSize: 20 }}>🏠</span>
+          <span style={{ fontSize: 20 }}>📹</span>
           <div>
-            <h2>Ring + Wyze Smart Hub 24/7</h2>
+            <h2>Mis Camaras</h2>
             <div style={{ fontSize: 11.5, color: '#94a3b8' }}>
               Filtro exclusivo de personas (IA) • {solar.is_night ? '🌙 Modo Nocturno Activo' : '☀️ Modo Diurno'}{' '}
               {solar.sunset && solar.sunrise ? `(Anochecer ${solar.sunset} / Amanecer ${solar.sunrise})` : ''}
