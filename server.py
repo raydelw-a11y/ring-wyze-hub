@@ -28,7 +28,11 @@ from zoneinfo import ZoneInfo
 from aiohttp import web
 from dotenv import load_dotenv
 from ring_doorbell import Auth, Ring, RingEvent, RingEventListener
-from ring_doorbell.const import SNAPSHOT_ENDPOINT, SNAPSHOT_TIMESTAMP_ENDPOINT
+from ring_doorbell.const import (
+    SETTINGS_ENDPOINT,
+    SNAPSHOT_ENDPOINT,
+    SNAPSHOT_TIMESTAMP_ENDPOINT,
+)
 from wyze_sdk import Client as WyzeClient
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -297,6 +301,14 @@ class SmartHubEngine:
         self.seen_signatures: Set[str] = set()
         self.person_events: List[Dict[str, Any]] = []
 
+        # Aviso de voz en Driveway Cam:
+        # - De noche: activa el Motion Warning nativo en el chip de Driveway Cam (471823260)
+        # - De día: incrementa driveway_voice_seq para que la Tablet diga "Hay una persona en el driveway"
+        self.driveway_cam_id = 471823260
+        self.driveway_night_warning_enabled: Optional[bool] = None
+        self.driveway_voice_seq = 0
+        self.driveway_voice_text = "Hay una persona en el driveway"
+
         # Base de datos de dispositivos (Zero-Trust autorización manual desde la Mac)
         self.devices_db: Dict[str, Dict[str, Any]] = load_json_file(DEVICES_DB_PATH)
         preapproved = os.getenv("PREAPPROVED_DEVICE_TOKENS", "").strip()
@@ -331,6 +343,32 @@ class SmartHubEngine:
         if not self.night_only:
             return True
         return is_nighttime(self.lat, self.lon)
+
+    async def sync_driveway_night_warning(self) -> None:
+        """
+        Activa automáticamente el aviso de voz nativo en la cámara Driveway Cam (471823260)
+        únicamente de noche (entre el anochecer y el amanecer) y lo apaga de día.
+        """
+        if not self.ring:
+            return
+        should_enable = is_nighttime(self.lat, self.lon)
+        if self.driveway_night_warning_enabled == should_enable:
+            return
+        try:
+            url = SETTINGS_ENDPOINT.format(self.driveway_cam_id)
+            payload = {
+                "backend_settings": {"motion_warning_enabled": should_enable},
+                "client_device_settings": {"motion_message_enabled": should_enable},
+            }
+            resp = await self.ring.async_query(url, method="PATCH", json=payload)
+            if resp.status_code in (200, 204):
+                self.driveway_night_warning_enabled = should_enable
+                logger.info(
+                    "🔊 Aviso Nocturno en Driveway Cam -> %s",
+                    "ACTIVADO (Noche)" if should_enable else "DESACTIVADO (Día)",
+                )
+        except Exception as exc:
+            logger.warning("No se pudo sincronizar aviso nocturno de Driveway Cam: %s", exc)
 
     async def fetch_camera_snapshot(self, cam_id: int, request_fresh: bool = False) -> bool:
         """
@@ -415,7 +453,18 @@ class SmartHubEngine:
         else:
             logger.info("🚶 PERSONA en '%s' (%s) -> Actualizando solo su snapshot", cam_name, source)
 
-        # 3. Registrar en historial exclusivo de personas
+        # 3. Si es Driveway Cam (471823260) y es de DÍA (entre amanecer y anochecer),
+        #    disparar aviso hablado en español en la Tablet: "Hay una persona en el driveway"
+        is_driveway = cam_id == self.driveway_cam_id or "driveway" in cam_name.strip().lower()
+        if is_driveway and not is_nighttime(self.lat, self.lon):
+            self.driveway_voice_seq += 1
+            logger.info(
+                "🗣️ PERSONA de día en Driveway Cam -> Disparando voz en Tablet (seq=%d): '%s'",
+                self.driveway_voice_seq,
+                self.driveway_voice_text,
+            )
+
+        # 4. Registrar en historial exclusivo de personas
         self.person_events.insert(
             0,
             {
@@ -541,6 +590,7 @@ class SmartHubEngine:
         await self.ring.async_create_session()
         await self.ring.async_update_data()
         await self.preload_cameras_and_snapshots()
+        await self.sync_driveway_night_warning()
 
         try:
             fcm_creds = load_fcm_creds()
@@ -557,6 +607,7 @@ class SmartHubEngine:
             self.listener = None
 
         last_poll = time.monotonic()
+        last_solar_sync = time.monotonic()
         last_keepalive = time.monotonic()
         public_url = os.getenv("RENDER_EXTERNAL_URL", "https://ring-wyze-hub.onrender.com").rstrip("/")
         while True:
@@ -574,6 +625,11 @@ class SmartHubEngine:
                 if (now_mono - last_poll) >= poll_interval:
                     last_poll = now_mono
                     await self.poll_history_for_persons()
+
+                # Sincronizar cada 60s el Aviso Nocturno de Driveway Cam (ON de noche, OFF de día)
+                if (now_mono - last_solar_sync) >= 60.0:
+                    last_solar_sync = now_mono
+                    await self.sync_driveway_night_warning()
 
                 # Auto-keepalive cada 9 minutos para que Render Free nunca entre en spin-down de madrugada
                 if (now_mono - last_keepalive) >= 540.0:
@@ -691,6 +747,11 @@ async def api_state(request: web.Request) -> web.Response:
                 "sunrise": solar_times["sunrise"].strftime("%I:%M %p"),
                 "sunset": solar_times["sunset"].strftime("%I:%M %p"),
                 "is_night": is_nighttime(engine.lat, engine.lon),
+            },
+            "driveway_voice": {
+                "seq": engine.driveway_voice_seq,
+                "text": engine.driveway_voice_text,
+                "night_cam_warning_active": bool(engine.driveway_night_warning_enabled),
             },
             "person_events": engine.person_events[:10],
         }

@@ -1,14 +1,65 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 04:10 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 04:25 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
-const CameraCard = React.memo(function CameraCard({ cam, deviceToken }) {
+// Reproductor de alerta hablada en español para la Tablet ("Hay una persona en el driveway")
+function speakSpanishAlert(text = 'Hay una persona en el driveway') {
+  try {
+    // 1. Campanilla corta de atención (Web Audio API)
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(660, ctx.currentTime);
+      osc.frequency.setValueAtTime(880, ctx.currentTime + 0.14);
+      gain.gain.setValueAtTime(0.18, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.36);
+    }
+  } catch {
+    // Ignorar si Web Audio no está disponible
+  }
+
+  try {
+    // 2. Síntesis de voz en español (Web Speech API)
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.lang = 'es-US';
+      utter.rate = 0.98;
+      utter.pitch = 1.0;
+      utter.volume = 1.0;
+
+      const voices = window.speechSynthesis.getVoices() || [];
+      const esVoice =
+        voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('es-us')) ||
+        voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('es-mx')) ||
+        voices.find((v) => v.lang && v.lang.toLowerCase().startsWith('es'));
+      if (esVoice) {
+        utter.voice = esVoice;
+      }
+
+      window.speechSynthesis.speak(utter);
+    }
+  } catch {
+    // Ignorar errores de síntesis
+  }
+}
+
+const CameraCard = React.memo(function CameraCard({ cam, deviceToken, isNight }) {
   const imgUrl = `/api/cameras/${cam.id}/snapshot?v=${cam.snapshot_version}&token=${encodeURIComponent(
     deviceToken
   )}`;
+  const isDriveway =
+    cam.id === 471823260 || (cam.name || '').toLowerCase().includes('driveway');
 
   return (
     <div className={`camera-card ${cam.person_active ? 'person-active' : ''}`}>
@@ -17,6 +68,11 @@ const CameraCard = React.memo(function CameraCard({ cam, deviceToken }) {
           <span>📹 {cam.name}</span>
           {cam.triggers_front_light && (
             <span className="auto-light-tag">💡 Luz Automática</span>
+          )}
+          {isDriveway && (
+            <span className="auto-light-tag" style={{ color: '#fdba74', borderColor: 'rgba(251, 146, 60, 0.3)', background: 'rgba(251, 146, 60, 0.12)' }}>
+              {isNight ? '🔊 Voz en Cámara (Noche)' : '🗣️ Voz en Tablet (Día)'}
+            </span>
           )}
         </div>
         <div>
@@ -56,6 +112,33 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState('checking'); // 'unauthenticated' | 'pending' | 'approved'
   const [hubState, setHubState] = useState(null);
   const [togglingPlug, setTogglingPlug] = useState(false);
+  const lastSpokenSeqRef = useRef(null);
+
+  // Precargar voces del navegador y desbloquear síntesis al primer toque en la pantalla de la Tablet
+  useEffect(() => {
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.getVoices();
+    }
+    const unlockAudio = () => {
+      try {
+        if ('speechSynthesis' in window) {
+          const silent = new SpeechSynthesisUtterance('');
+          silent.volume = 0;
+          window.speechSynthesis.speak(silent);
+        }
+      } catch {
+        // Ignorar
+      }
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+    window.addEventListener('pointerdown', unlockAudio, { passive: true });
+    window.addEventListener('keydown', unlockAudio, { passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio);
+      window.removeEventListener('keydown', unlockAudio);
+    };
+  }, []);
 
   const checkDeviceStatus = useCallback(async (tokenToCheck) => {
     if (!tokenToCheck) {
@@ -116,7 +199,18 @@ export default function App() {
         }
         if (res.ok) {
           const data = await res.json();
-          if (active) setHubState(data);
+          if (active) {
+            const nextSeq = data.driveway_voice?.seq ?? 0;
+            const voiceText =
+              data.driveway_voice?.text || 'Hay una persona en el driveway';
+            if (lastSpokenSeqRef.current === null) {
+              lastSpokenSeqRef.current = nextSeq;
+            } else if (nextSeq > lastSpokenSeqRef.current) {
+              lastSpokenSeqRef.current = nextSeq;
+              speakSpanishAlert(voiceText);
+            }
+            setHubState(data);
+          }
         }
       } catch {
         // Ignorar errores transitorios
@@ -276,6 +370,15 @@ export default function App() {
         </div>
 
         <div className="status-pills">
+          <button
+            type="button"
+            onClick={() => speakSpanishAlert('Hay una persona en el driveway')}
+            className="toggle-btn"
+            title="Probar y activar voz en español en la Tablet"
+          >
+            🔊 Probar Voz Tablet
+          </button>
+
           <div className={`pill ${frontLight.is_on ? 'light-on' : 'online'}`}>
             <span>💡 Front Light Plug:</span>
             <strong>{frontLight.is_on ? 'ENCENDIDO' : 'APAGADO'}</strong>
@@ -301,6 +404,7 @@ export default function App() {
             key={cam.id}
             cam={cam}
             deviceToken={deviceToken}
+            isNight={Boolean(solar.is_night)}
           />
         ))}
       </main>
