@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 09:31 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 09:46 PM - 10/26/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -71,7 +71,7 @@ const CameraCard = React.memo(function CameraCard({ cam, deviceToken, isNight })
           )}
           {isDriveway && (
             <span className="auto-light-tag" style={{ color: '#fdba74', borderColor: 'rgba(251, 146, 60, 0.3)', background: 'rgba(251, 146, 60, 0.12)' }}>
-              🗣️ Voz en Tablet 24/7
+              {isNight ? '🔊 Voz Cámara (EN) + Tablet' : '🗣️ Voz en Tablet'}
             </span>
           )}
         </div>

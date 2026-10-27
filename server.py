@@ -345,6 +345,7 @@ class SmartHubEngine:
         self.driveway_night_warning_enabled: Optional[bool] = None
         self.driveway_voice_seq = 0
         self.driveway_voice_text = "Hay una persona en el driveway"
+        self.last_driveway_outdoor_voice_mono = 0.0
 
         # Base de datos de dispositivos (Zero-Trust autorización manual desde la Mac)
         self.devices_db: Dict[str, Dict[str, Any]] = load_json_file(DEVICES_DB_PATH)
@@ -380,6 +381,61 @@ class SmartHubEngine:
         if not self.night_only:
             return True
         return is_nighttime(self.lat, self.lon)
+
+    async def play_driveway_outdoor_warning(self, force: bool = False) -> bool:
+        """
+        Reproduce el aviso en inglés ("Hi, you are currently being recorded") directamente
+        por el altavoz exterior de Driveway Cam (471823260) mediante WebRTC Two-Way Audio.
+        """
+        if not self.auth:
+            return False
+        now_mono = time.monotonic()
+        if not force and (now_mono - self.last_driveway_outdoor_voice_mono) < 45.0:
+            return False
+        self.last_driveway_outdoor_voice_mono = now_mono
+
+        script_path = BASE_DIR / "speak_camera.cjs"
+        audio_path = BASE_DIR / "driveway_warning_en.mp3"
+        if not script_path.exists() or not audio_path.exists():
+            logger.warning("Faltan archivos speak_camera.cjs o driveway_warning_en.mp3")
+            return False
+
+        try:
+            r = await self.auth.async_query(
+                "https://app.ring.com/api/v1/clap/ticket/request/signalsocket",
+                method="POST",
+            )
+            ticket = (r.json() or {}).get("ticket")
+            if not ticket:
+                return False
+
+            node_bin = shutil.which("node") or "node"
+            ffmpeg_bin = get_ffmpeg_binary()
+            logger.info(
+                "📢 Enviando audio en inglés ('Hi, you are currently being recorded') al altavoz exterior de Driveway Cam..."
+            )
+            proc = await asyncio.create_subprocess_exec(
+                node_bin,
+                str(script_path),
+                ticket,
+                str(self.driveway_cam_id),
+                str(audio_path),
+                ffmpeg_bin,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=22.0)
+            if proc.returncode == 0:
+                logger.info("📢 Audio exterior reproducido con éxito en Driveway Cam.")
+                return True
+            logger.warning(
+                "Fallo en speak_camera.cjs (code=%s): %s",
+                proc.returncode,
+                stderr.decode("utf-8", errors="ignore")[:300],
+            )
+        except Exception as exc:
+            logger.warning("No se pudo reproducir audio exterior en Driveway Cam: %s", exc)
+        return False
 
     async def sync_driveway_night_warning(self) -> None:
         """
@@ -591,8 +647,9 @@ class SmartHubEngine:
         else:
             logger.info("🚶 PERSONA en '%s' (%s) -> Actualizando solo su snapshot", cam_name, source)
 
-        # 3. Si es Driveway Cam (471823260), disparar aviso hablado en español en la Tablet 24/7 (día y noche):
-        #    "Hay una persona en el driveway"
+        # 3. Si es Driveway Cam (471823260):
+        #    - En la Tablet (24/7): dice en español "Hay una persona en el driveway"
+        #    - En la cámara exterior (de noche): reproduce en inglés "Hi, you are currently being recorded"
         is_driveway = cam_id == self.driveway_cam_id or "driveway" in cam_name.strip().lower()
         if is_driveway:
             self.driveway_voice_seq += 1
@@ -601,6 +658,8 @@ class SmartHubEngine:
                 self.driveway_voice_seq,
                 self.driveway_voice_text,
             )
+            if self.check_night_allowed():
+                asyncio.create_task(self.play_driveway_outdoor_warning())
 
         # 4. Registrar en historial exclusivo de personas
         self.person_events.insert(
