@@ -591,13 +591,13 @@ class SmartHubEngine:
         else:
             logger.info("🚶 PERSONA en '%s' (%s) -> Actualizando solo su snapshot", cam_name, source)
 
-        # 3. Si es Driveway Cam (471823260) y es de DÍA (entre amanecer y anochecer),
-        #    disparar aviso hablado en español en la Tablet: "Hay una persona en el driveway"
+        # 3. Si es Driveway Cam (471823260), disparar aviso hablado en español en la Tablet 24/7 (día y noche):
+        #    "Hay una persona en el driveway"
         is_driveway = cam_id == self.driveway_cam_id or "driveway" in cam_name.strip().lower()
-        if is_driveway and not is_nighttime(self.lat, self.lon):
+        if is_driveway:
             self.driveway_voice_seq += 1
             logger.info(
-                "🗣️ PERSONA de día en Driveway Cam -> Disparando voz en Tablet (seq=%d): '%s'",
+                "🗣️ PERSONA en Driveway Cam -> Disparando voz en Tablet (seq=%d): '%s'",
                 self.driveway_voice_seq,
                 self.driveway_voice_text,
             )
