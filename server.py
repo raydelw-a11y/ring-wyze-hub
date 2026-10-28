@@ -222,6 +222,46 @@ def set_front_light_plug(turn_on: bool) -> bool:
     return False
 
 
+def set_mac_wyze_plugs(turn_on: bool) -> bool:
+    """Enciende o apaga los plugs 'Laptop' y 'Fan' desde la nube 24/7 para despertar/dormir la Mac."""
+    load_dotenv(ENV_PATH, override=False)
+    mac_plugs = [
+        ("Laptop", os.getenv("WYZE_LAPTOP_PLUG_MAC", "80482CA693BA").strip(), "WLPP1CFH"),
+        ("Fan", os.getenv("WYZE_FAN_PLUG_MAC", "2CAA8E5885E3").strip(), "WLPP1"),
+    ]
+    for attempt in (1, 2):
+        try:
+            cache = load_json_file(WYZE_CACHE_PATH)
+            if attempt == 1 and cache.get("access_token"):
+                client = WyzeClient(
+                    token=cache["access_token"],
+                    refresh_token=cache.get("refresh_token"),
+                    timeout=10,
+                )
+            else:
+                client = WyzeClient(
+                    email=os.getenv("WYZE_EMAIL", "").strip(),
+                    password=os.getenv("WYZE_PASSWORD", "").strip(),
+                    key_id=os.getenv("WYZE_KEY_ID", "").strip(),
+                    api_key=os.getenv("WYZE_API_KEY", "").strip(),
+                    timeout=15,
+                )
+                cache["access_token"] = client._token
+                cache["refresh_token"] = client._refresh_token
+                save_json_file(WYZE_CACHE_PATH, cache)
+
+            for name, pmac, pmodel in mac_plugs:
+                if turn_on:
+                    client.plugs.turn_on(device_mac=pmac, device_model=pmodel)
+                else:
+                    client.plugs.turn_off(device_mac=pmac, device_model=pmodel)
+                logger.info("💻 Wyze Mac Plug '%s' (%s) -> %s", name, pmac, "ON" if turn_on else "OFF")
+            return True
+        except Exception as exc:
+            logger.warning("Intento %d falló al cambiar plugs de Mac: %s", attempt, exc)
+    return False
+
+
 def is_any_human_entry(entry: Dict[str, Any]) -> bool:
     cv = entry.get("cv_properties") or {}
     det_type = (cv.get("detection_type") or "").strip().lower()
@@ -1107,6 +1147,38 @@ async def api_admin_approve_device(request: web.Request) -> web.Response:
     return web.json_response({"updated": matched})
 
 
+async def api_mac_power(request: web.Request) -> web.Response:
+    """Endpoint 24/7 en la nube para Encender o Apagar la Mac desde Atajos de iPhone (5G/Wi-Fi)."""
+    key = request.query.get("key", "").strip()
+    if key != "774921":
+        return web.json_response({"error": "Key inválida"}, status=403)
+
+    action = request.match_info.get("action", "encender").strip().lower()
+    turn_on = action in ("encender", "wake", "on", "despertar")
+
+    ok = await asyncio.to_thread(set_mac_wyze_plugs, turn_on)
+
+    # Notificar también por ntfy a la Mac
+    ntfy_msg = "despertar" if turn_on else "dormir"
+    try:
+        import urllib.request
+        await asyncio.to_thread(
+            lambda: urllib.request.urlopen(
+                f"https://ntfy.sh/raydel-mac-774921/publish?message={ntfy_msg}", timeout=5
+            ).read()
+        )
+    except Exception:
+        pass
+
+    return web.json_response(
+        {
+            "ok": ok,
+            "action": "encender" if turn_on else "apagar",
+            "message": "✅ Mac encendida (Plugs Laptop y Fan ON)" if turn_on else "💤 Mac apagada (Plugs Laptop y Fan OFF)",
+        }
+    )
+
+
 async def index_handler(request: web.Request) -> web.FileResponse:
     return web.FileResponse(DIST_DIR / "index.html")
 
@@ -1134,6 +1206,7 @@ def create_app() -> web.Application:
     app.on_cleanup.append(on_cleanup)
 
     app.router.add_get("/api/health", api_health)
+    app.router.add_get("/api/mac/{action}", api_mac_power)
     app.router.add_post("/api/auth/request-access", api_request_access)
     app.router.add_get("/api/auth/status", api_auth_status)
     app.router.add_get("/api/state", api_state)

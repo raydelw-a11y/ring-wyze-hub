@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 09:46 PM - 10/26/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 09:02 PM - 10/27/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
