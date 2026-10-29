@@ -105346,18 +105346,49 @@ var camera = {
 async function run() {
   const conn = new WebrtcConnection(ticket, camera, {});
   const session = new StreamingSession(camera, conn);
+  let sentPackets = 0;
+  const origSend = conn.sendAudioPacket.bind(conn);
+  conn.sendAudioPacket = (rtp) => {
+    sentPackets++;
+    return origSend(rtp);
+  };
+  const unmuteSpeaker = () => {
+    try {
+      conn.sendSessionMessage("camera_options", { stealth_mode: false });
+      conn.sendSessionMessage("stream_options", { audio_enabled: true, video_enabled: true });
+    } catch (_) {
+    }
+  };
   conn.onCallAnswered.subscribe(() => console.log("SDP Answered by Ring"));
-  conn.onCameraConnected.subscribe(() => console.log("Camera Connected! Activating speaker..."));
+  conn.onCameraConnected.subscribe(() => {
+    console.log("Camera Connected! Activating speaker...");
+    unmuteSpeaker();
+  });
+  conn.onMessage.subscribe((msg) => {
+    if (msg && (msg.method === "camera_started" || msg.method === "stream_info")) {
+      console.log(`Received ${msg.method} -> ensuring speaker stealth_mode=false`);
+      unmuteSpeaker();
+    }
+  });
   session.activateCameraSpeaker();
-  await (0, import_rxjs6.firstValueFrom)((0, import_rxjs6.race)(conn.onCameraConnected, (0, import_rxjs6.timer)(1e4)));
-  await new Promise((r) => setTimeout(r, 600));
+  await (0, import_rxjs6.firstValueFrom)((0, import_rxjs6.race)(conn.onCameraConnected, (0, import_rxjs6.timer)(12e3)));
+  if (session.hasEnded) {
+    console.error("Session ended before audio could start");
+    process.exit(2);
+  }
+  await new Promise((r) => setTimeout(r, 1e3));
+  unmuteSpeaker();
   console.log("Streaming English warning audio to camera speaker...");
   await session.transcodeReturnAudio({
     input: [audioPath]
   });
-  await (0, import_rxjs6.firstValueFrom)((0, import_rxjs6.race)(session.onCallEnded, (0, import_rxjs6.timer)(7e3)));
-  console.log("Audio playback complete, closing session.");
+  await (0, import_rxjs6.firstValueFrom)((0, import_rxjs6.race)(session.onCallEnded, (0, import_rxjs6.timer)(11e3)));
+  console.log(`Audio playback complete (sent ${sentPackets} RTP packets), closing session.`);
   session.stop();
+  if (sentPackets < 20) {
+    console.error(`Too few RTP packets sent (${sentPackets})`);
+    process.exit(2);
+  }
   process.exit(0);
 }
 run().catch((err5) => {

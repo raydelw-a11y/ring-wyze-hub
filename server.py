@@ -56,6 +56,58 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ring_wyze_hub")
 
+# ---------------------------------------------------------------------------
+# Parche crítico para firebase_messaging (evita crash binascii.Error: Incorrect padding
+# que apagaba FcmPushClient y dejaba de recibir eventos en tiempo real de Ring)
+# ---------------------------------------------------------------------------
+try:
+    from base64 import urlsafe_b64decode
+    from cryptography.hazmat.backends import default_backend
+    from cryptography.hazmat.primitives.serialization import load_der_private_key
+    from firebase_messaging import FcmPushClient
+    from http_ece import decrypt as http_decrypt
+
+    @staticmethod
+    def _patched_decrypt_raw_data(
+        credentials: dict,
+        crypto_key_str: str,
+        salt_str: str,
+        raw_data: bytes,
+    ) -> bytes:
+        ck_clean = crypto_key_str.split(";")[0].strip().encode("ascii") + b"========"
+        salt_clean = salt_str.split(";")[0].strip().encode("ascii") + b"========"
+        crypto_key = urlsafe_b64decode(ck_clean)
+        salt = urlsafe_b64decode(salt_clean)
+        der_data_str = credentials["keys"]["private"].strip()
+        der_data = urlsafe_b64decode(der_data_str.encode("ascii") + b"========")
+        secret_str = credentials["keys"]["secret"].strip()
+        secret = urlsafe_b64decode(secret_str.encode("ascii") + b"========")
+        privkey = load_der_private_key(
+            der_data, password=None, backend=default_backend()
+        )
+        return http_decrypt(
+            raw_data,
+            salt=salt,
+            private_key=privkey,
+            dh=crypto_key,
+            version="aesgcm",
+            auth_secret=secret,
+        )
+
+    FcmPushClient._decrypt_raw_data = _patched_decrypt_raw_data
+
+    _orig_fcm_handle_message = FcmPushClient._handle_message
+
+    async def _safe_fcm_handle_message(self_fcm: Any, msg: Any) -> None:
+        try:
+            await _orig_fcm_handle_message(self_fcm, msg)
+        except Exception as exc:
+            logger.warning("Mensaje FCM ignorado sin cerrar listener: %s", exc)
+
+    FcmPushClient._handle_message = _safe_fcm_handle_message
+except Exception as _patch_exc:
+    logger.warning("No se pudo aplicar parche FcmPushClient: %s", _patch_exc)
+
 
 # ---------------------------------------------------------------------------
 # Cálculo astronómico NOAA de Amanecer (Sunrise) y Anochecer (Sunset)
@@ -298,7 +350,7 @@ def get_ffmpeg_binary() -> str:
         return "ffmpeg"
 
 
-def is_human_history_entry(entry: Dict[str, Any], max_age_seconds: float = 90.0) -> bool:
+def is_human_history_entry(entry: Dict[str, Any], max_age_seconds: float = 180.0) -> bool:
     created_raw = entry.get("created_at")
     if created_raw:
         try:
@@ -307,7 +359,10 @@ def is_human_history_entry(entry: Dict[str, Any], max_age_seconds: float = 90.0)
             else:
                 dt = created_raw
             age = (datetime.now(dt.tzinfo) - dt).total_seconds()
-            if age > max_age_seconds:
+            dur = float(entry.get("duration") or 0.0)
+            # En grabaciones largas de 120s en cámaras de batería, el evento finaliza en created_at + dur
+            effective_age = max(0.0, age - dur)
+            if effective_age > max_age_seconds:
                 return False
         except Exception:
             pass
@@ -430,7 +485,7 @@ class SmartHubEngine:
         if not self.auth:
             return False
         now_mono = time.monotonic()
-        if not force and (now_mono - self.last_driveway_outdoor_voice_mono) < 45.0:
+        if not force and (now_mono - self.last_driveway_outdoor_voice_mono) < 35.0:
             return False
         self.last_driveway_outdoor_voice_mono = now_mono
 
@@ -440,41 +495,52 @@ class SmartHubEngine:
             logger.warning("Faltan archivos speak_camera.cjs o driveway_warning_en.mp3")
             return False
 
-        try:
-            r = await self.auth.async_query(
-                "https://app.ring.com/api/v1/clap/ticket/request/signalsocket",
-                method="POST",
-            )
-            ticket = (r.json() or {}).get("ticket")
-            if not ticket:
-                return False
+        node_bin = shutil.which("node") or "node"
+        ffmpeg_bin = get_ffmpeg_binary()
 
-            node_bin = shutil.which("node") or "node"
-            ffmpeg_bin = get_ffmpeg_binary()
-            logger.info(
-                "📢 Enviando audio en inglés ('Hi, you are currently being recorded') al altavoz exterior de Driveway Cam..."
-            )
-            proc = await asyncio.create_subprocess_exec(
-                node_bin,
-                str(script_path),
-                ticket,
-                str(self.driveway_cam_id),
-                str(audio_path),
-                ffmpeg_bin,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=22.0)
-            if proc.returncode == 0:
-                logger.info("📢 Audio exterior reproducido con éxito en Driveway Cam.")
-                return True
-            logger.warning(
-                "Fallo en speak_camera.cjs (code=%s): %s",
-                proc.returncode,
-                stderr.decode("utf-8", errors="ignore")[:300],
-            )
-        except Exception as exc:
-            logger.warning("No se pudo reproducir audio exterior en Driveway Cam: %s", exc)
+        for attempt in (1, 2):
+            try:
+                r = await self.auth.async_query(
+                    "https://app.ring.com/api/v1/clap/ticket/request/signalsocket",
+                    method="POST",
+                )
+                ticket = (r.json() or {}).get("ticket")
+                if not ticket:
+                    return False
+
+                logger.info(
+                    "📢 [Intento %d] Enviando audio en inglés ('Hi, you are currently being recorded') al altavoz exterior de Driveway Cam...",
+                    attempt,
+                )
+                proc = await asyncio.create_subprocess_exec(
+                    node_bin,
+                    str(script_path),
+                    ticket,
+                    str(self.driveway_cam_id),
+                    str(audio_path),
+                    ffmpeg_bin,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+                out_str = stdout.decode("utf-8", errors="ignore").strip().replace("\n", " | ")
+                if proc.returncode == 0:
+                    logger.info(
+                        "📢 Audio exterior reproducido con éxito en Driveway Cam (%s).",
+                        out_str[-140:] if out_str else "OK",
+                    )
+                    return True
+                logger.warning(
+                    "Fallo en speak_camera.cjs (intento=%d, code=%s, out=%s): %s",
+                    attempt,
+                    proc.returncode,
+                    out_str[-120:],
+                    stderr.decode("utf-8", errors="ignore")[:250],
+                )
+            except Exception as exc:
+                logger.warning("Intento %d falló al reproducir audio exterior en Driveway Cam: %s", attempt, exc)
+            if attempt == 1:
+                await asyncio.sleep(1.5)
         return False
 
     async def sync_driveway_night_warning(self) -> None:
@@ -636,10 +702,19 @@ class SmartHubEngine:
     async def _refresh_person_snapshot_sequence(self, cam_id: int) -> None:
         """
         Cuando una cámara detecta una PERSONA, actualiza SOLO el snapshot de esa cámara:
-        1) Pide captura fresca inmediata (+2.0s) y (+6.0s)
-        2) A los +16s extrae también el fotograma exacto de la grabación de esa persona
-           por si la cámara (como Yard Cam) no soporta snapshots en vivo.
+        - Si es Driveway Cam de noche, primero deja que la sesión WebRTC reproduzca el aviso de voz
+          sin interferir con POST /snapshots/timestamps en la cámara de batería.
+        - Para las demás cámaras, pide captura fresca inmediata (+2.0s) y (+6.0s), y a los +16s
+          extrae el fotograma exacto de la grabación de esa persona.
         """
+        if cam_id == self.driveway_cam_id and self.check_night_allowed():
+            await self.fetch_camera_snapshot(cam_id, request_fresh=False)
+            await asyncio.sleep(11.5)
+            await self.fetch_camera_snapshot(cam_id, request_fresh=True)
+            await asyncio.sleep(8.0)
+            await self.fetch_last_human_event_snapshot(cam_id)
+            return
+
         await self.fetch_camera_snapshot(cam_id, request_fresh=True)
         await asyncio.sleep(4.0)
         await self.fetch_camera_snapshot(cam_id, request_fresh=True)
@@ -720,8 +795,16 @@ class SmartHubEngine:
         state_lower = (event.state or "").strip().lower()
         kind_lower = (event.kind or "").strip().lower()
 
-        # Ignorar eventos viejos encolados (> 90s)
-        if event.now and abs(time.time() - event.now) > 90.0:
+        logger.info(
+            "📲 Push Ring recibido -> Cámara: '%s' | kind='%s' | state='%s' | id=%s",
+            cam_name,
+            event.kind,
+            event.state,
+            event.id,
+        )
+
+        # Ignorar eventos viejos encolados (> 120s)
+        if event.now and abs(time.time() - event.now) > 120.0:
             return
 
         # Regla estricta: SOLO personas ('human' / 'person'). Ignorar 'vehicle', 'other', etc.
@@ -884,15 +967,37 @@ class SmartHubEngine:
                     if ok:
                         self.light_is_on = False
 
-                poll_interval = 6.0 if self.light_is_on else 12.0
+                poll_interval = 5.0
                 if (now_mono - last_poll) >= poll_interval:
                     last_poll = now_mono
                     await self.poll_history_for_persons()
 
                 # Sincronizar cada 60s el Aviso Nocturno de Driveway Cam (ON de noche, OFF de día)
+                # y verificar que el listener FCM Push siga activo
                 if (now_mono - last_solar_sync) >= 60.0:
                     last_solar_sync = now_mono
                     await self.sync_driveway_night_warning()
+                    try:
+                        receiver = getattr(self.listener, "_receiver", None) if self.listener else None
+                        run_task = getattr(receiver, "run_task", None) if receiver else None
+                        if not self.listener or not self.listener.started or (run_task and run_task.done()):
+                            logger.warning("Reconectando listener FCM Push de Ring...")
+                            if self.listener:
+                                try:
+                                    await self.listener.stop()
+                                except Exception:
+                                    pass
+                            fcm_creds = load_fcm_creds()
+                            self.listener = RingEventListener(
+                                self.ring,
+                                credentials=fcm_creds,
+                                credentials_updated_callback=save_fcm_creds,
+                            )
+                            await self.listener.start()
+                            self.listener.add_notification_callback(self.on_ring_push_event)
+                            logger.info("Listener FCM Push de Ring reconectado con éxito.")
+                    except Exception as fcm_exc:
+                        logger.warning("Error verificando listener FCM: %s", fcm_exc)
 
                 # Auto-keepalive cada 9 minutos para que Render Free nunca entre en spin-down de madrugada
                 if (now_mono - last_keepalive) >= 540.0:
