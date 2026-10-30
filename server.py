@@ -545,29 +545,111 @@ class SmartHubEngine:
 
     async def sync_driveway_night_warning(self) -> None:
         """
-        Activa automáticamente el aviso de voz nativo en la cámara Driveway Cam (471823260)
-        únicamente de noche (entre el anochecer y el amanecer) y lo apaga de día.
+        Garantiza que Driveway Cam (471823260) mantenga su configuración óptima de
+        detección de personas (human) 24/7, con event_settings.motion activo, zona
+        completa del driveway (y=0.02..1.0), sensibilidad alta de persona (0.5) y
+        sin que vehículos estacionados secuestren la clasificación IA.
         """
-        if not self.ring:
-            return
-        should_enable = is_nighttime(self.lat, self.lon)
-        if self.driveway_night_warning_enabled == should_enable:
+        if not self.ring or self.driveway_night_warning_enabled is True:
             return
         try:
             url = SETTINGS_ENDPOINT.format(self.driveway_cam_id)
+            full_vertices = [
+                {"x": 0.0, "y": 0.02},
+                {"x": 0.5, "y": 0.02},
+                {"x": 1.0, "y": 0.02},
+                {"x": 1.0, "y": 0.5},
+                {"x": 1.0, "y": 1.0},
+                {"x": 0.5, "y": 1.0},
+                {"x": 0.0, "y": 1.0},
+                {"x": 0.0, "y": 0.5},
+            ]
             payload = {
-                "backend_settings": {"motion_warning_enabled": should_enable},
-                "client_device_settings": {"motion_message_enabled": should_enable},
+                "backend_settings": {"motion_warning_enabled": False},
+                "client_device_settings": {"motion_message_enabled": False},
+                "event_settings": {
+                    "alarm": {"battery_powered_duration_s": 60, "line_powered_duration_s": 60},
+                    "key_access": {"max_duration_s": 720},
+                    "motion": {
+                        "battery_powered_max_duration_s": 120,
+                        "line_powered_max_duration_s": 120,
+                        "min_duration_s": 20,
+                    },
+                    "on_demand": {"max_duration_s": 1800},
+                    "on_demand_linked": {
+                        "battery_powered_duration_s": 60,
+                        "line_powered_duration_s": 60,
+                    },
+                },
+                "motion_settings": {
+                    "advanced_motion_detection_enabled": True,
+                    "advanced_motion_detection_human_only_mode": True,
+                    "advanced_motion_recording_human_mode": False,
+                    "enable_audio": False,
+                    "enable_recording": True,
+                    "motion_detection_enabled": True,
+                },
+                "cv_settings": {
+                    "detection_types": {
+                        "human": {
+                            "enabled": True,
+                            "mode": "cloud",
+                            "notification": True,
+                            "record": False,
+                        },
+                        "vehicle": {
+                            "action": "accept",
+                            "enabled": False,
+                            "mode": "none",
+                            "notification": False,
+                        },
+                        "other_motion": {
+                            "enabled": False,
+                            "mode": "none",
+                            "notification": False,
+                        },
+                    }
+                },
+                "advanced_motion_settings": {
+                    "active_motion_filter": 1,
+                    "advanced_object_settings": {
+                        "human_detection_confidence": {"day": 0.5, "night": 0.5},
+                        "motion_zone_overlap": {"day": 0.1, "night": 0.1},
+                        "object_size_maximum": {"day": 0.9, "night": 0.9},
+                        "object_size_minimum": {"day": 0.02, "night": 0.02},
+                        "object_time_overlap": {"day": 0.1, "night": 0.1},
+                    },
+                    "zone_1": {
+                        "name": "Default Zone",
+                        "state": 2,
+                        "vertex1": full_vertices[0],
+                        "vertex2": full_vertices[1],
+                        "vertex3": full_vertices[2],
+                        "vertex4": full_vertices[3],
+                        "vertex5": full_vertices[4],
+                        "vertex6": full_vertices[5],
+                        "vertex7": full_vertices[6],
+                        "vertex8": full_vertices[7],
+                    },
+                },
+                "zone_settings": {
+                    "motion": [
+                        {
+                            "id": "1873d999-78e3-4ff1-9e7a-778f969c5a3b",
+                            "name": "Default Zone",
+                            "properties": {"detection_types": ["motion"]},
+                            "state": "enabled",
+                            "vertices": full_vertices,
+                        }
+                    ]
+                },
             }
             resp = await self.ring.async_query(url, method="PATCH", json=payload)
             if resp.status_code in (200, 204):
-                self.driveway_night_warning_enabled = should_enable
-                logger.info(
-                    "🔊 Aviso Nocturno en Driveway Cam -> %s",
-                    "ACTIVADO (Noche)" if should_enable else "DESACTIVADO (Día)",
-                )
+                self.driveway_night_warning_enabled = True
+                logger.info("✅ Configuración IA de detección de personas restaurada y optimizada en Driveway Cam")
         except Exception as exc:
-            logger.warning("No se pudo sincronizar aviso nocturno de Driveway Cam: %s", exc)
+            logger.warning("No se pudo sincronizar configuración de Driveway Cam: %s", exc)
 
     async def fetch_last_human_event_snapshot(
         self, cam_id: int, entry: Optional[Dict[str, Any]] = None
@@ -816,12 +898,12 @@ class SmartHubEngine:
                         cam_id, cam_name, "Push IA (human)", [sig]
                     )
                 )
-        elif kind_lower == "motion" and state_lower not in ("vehicle", "other", "package"):
-            # Si el primer paquete llega como motion genérico, verificar en cv_properties si es persona
+        elif kind_lower == "motion":
+            # Si el primer paquete llega como motion sin human inmediato, verificar en cv_properties si se confirma persona
             asyncio.create_task(self._verify_person_in_history(cam_id, cam_name, event.id))
 
     async def _verify_person_in_history(self, cam_id: int, cam_name: str, event_id: int) -> None:
-        for delay in (1.5, 2.5, 4.0):
+        for delay in (1.5, 2.5, 3.5, 5.0, 6.0):
             await asyncio.sleep(delay)
             if f"id:{event_id}" in self.seen_signatures:
                 return
