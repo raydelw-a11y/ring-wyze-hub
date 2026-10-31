@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 /* global __BUILD_TIMESTAMP__ */
-const FALLBACK_TIMESTAMP = 'Actualizado: 09:02 PM - 10/29/2026';
+const FALLBACK_TIMESTAMP = 'Actualizado: 02:06 PM - 10/31/2026';
 const BUILD_TIMESTAMP =
   typeof __BUILD_TIMESTAMP__ !== 'undefined' ? __BUILD_TIMESTAMP__ : FALLBACK_TIMESTAMP;
 
@@ -54,7 +54,12 @@ function speakSpanishAlert(text = 'Hay una persona en el driveway') {
   }
 }
 
-const CameraCard = React.memo(function CameraCard({ cam, deviceToken, isNight }) {
+const CameraCard = React.memo(function CameraCard({
+  cam,
+  deviceToken,
+  isNight,
+  deviceVoiceEnabled,
+}) {
   const imgUrl = `/api/cameras/${cam.id}/snapshot?v=${cam.snapshot_version}&token=${encodeURIComponent(
     deviceToken
   )}`;
@@ -70,8 +75,25 @@ const CameraCard = React.memo(function CameraCard({ cam, deviceToken, isNight })
             <span className="auto-light-tag">💡 Luz Automática</span>
           )}
           {isDriveway && (
-            <span className="auto-light-tag" style={{ color: '#fdba74', borderColor: 'rgba(251, 146, 60, 0.3)', background: 'rgba(251, 146, 60, 0.12)' }}>
-              {isNight ? '🔊 Voz Cámara (EN) + Tablet' : '🗣️ Voz en Tablet'}
+            <span
+              className="auto-light-tag"
+              style={{
+                color: deviceVoiceEnabled ? '#fdba74' : '#94a3b8',
+                borderColor: deviceVoiceEnabled
+                  ? 'rgba(251, 146, 60, 0.3)'
+                  : 'rgba(148, 163, 184, 0.3)',
+                background: deviceVoiceEnabled
+                  ? 'rgba(251, 146, 60, 0.12)'
+                  : 'rgba(148, 163, 184, 0.1)',
+              }}
+            >
+              {isNight
+                ? deviceVoiceEnabled
+                  ? '🔊 Voz Cámara (EN) + Este Disp.'
+                  : '🔊 Voz Cámara (EN) • 🔇 Este Disp. OFF'
+                : deviceVoiceEnabled
+                  ? '🗣️ Voz Activa en Este Disp.'
+                  : '🔇 Voz Apagada en Este Disp.'}
             </span>
           )}
         </div>
@@ -103,8 +125,37 @@ export default function App() {
   const [hubState, setHubState] = useState(null);
   const [togglingPlug, setTogglingPlug] = useState(false);
   const [isFullscreenMode, setIsFullscreenMode] = useState(false);
+  const [deviceVoiceEnabled, setDeviceVoiceEnabled] = useState(
+    () => localStorage.getItem('rw_device_voice_enabled') !== 'false'
+  );
+  const deviceVoiceEnabledRef = useRef(deviceVoiceEnabled);
   const enteredFullscreenAtRef = useRef(0);
   const lastSpokenSeqRef = useRef(null);
+
+  useEffect(() => {
+    deviceVoiceEnabledRef.current = deviceVoiceEnabled;
+  }, [deviceVoiceEnabled]);
+
+  const handleToggleDeviceVoice = useCallback(() => {
+    setDeviceVoiceEnabled((prev) => {
+      const next = !prev;
+      localStorage.setItem('rw_device_voice_enabled', next ? 'true' : 'false');
+      deviceVoiceEnabledRef.current = next;
+      try {
+        if ('speechSynthesis' in window) {
+          window.speechSynthesis.cancel();
+          if (next) {
+            const silent = new SpeechSynthesisUtterance('');
+            silent.volume = 0;
+            window.speechSynthesis.speak(silent);
+          }
+        }
+      } catch {
+        // Ignorar
+      }
+      return next;
+    });
+  }, []);
 
   const enterFullscreenMode = useCallback((e) => {
     if (e) e.stopPropagation();
@@ -276,7 +327,9 @@ export default function App() {
               lastSpokenSeqRef.current = nextSeq;
             } else if (nextSeq > lastSpokenSeqRef.current) {
               lastSpokenSeqRef.current = nextSeq;
-              speakSpanishAlert(voiceText);
+              if (deviceVoiceEnabledRef.current) {
+                speakSpanishAlert(voiceText);
+              }
             }
             setHubState(data);
           }
@@ -485,11 +538,26 @@ export default function App() {
 
             <button
               type="button"
+              onClick={handleToggleDeviceVoice}
+              className={`toggle-btn ${deviceVoiceEnabled ? 'voice-on' : 'voice-off'}`}
+              title={
+                deviceVoiceEnabled
+                  ? 'Voz "Hay una persona en el driveway" ACTIVADA en este dispositivo. Haz clic para apagarla solo aquí (no afecta otros dispositivos).'
+                  : 'Voz "Hay una persona en el driveway" APAGADA en este dispositivo (no afecta otros dispositivos). Haz clic para activarla aquí.'
+              }
+            >
+              {deviceVoiceEnabled
+                ? '🔊 Voz en este dispositivo: ON'
+                : '🔇 Voz en este dispositivo: OFF'}
+            </button>
+
+            <button
+              type="button"
               onClick={() => speakSpanishAlert('Hay una persona en el driveway')}
               className="toggle-btn"
-              title="Probar y activar voz en español en la Tablet"
+              title="Probar voz en español en este dispositivo"
             >
-              🔊 Probar Voz Tablet
+              🗣️ Probar Voz
             </button>
 
             <div className={`pill ${frontLight.is_on ? 'light-on' : 'online'}`}>
@@ -519,6 +587,7 @@ export default function App() {
             cam={cam}
             deviceToken={deviceToken}
             isNight={Boolean(solar.is_night)}
+            deviceVoiceEnabled={deviceVoiceEnabled}
           />
         ))}
       </main>

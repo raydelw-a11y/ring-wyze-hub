@@ -247,6 +247,18 @@ body,
   border-color: #fbbf24;
 }
 
+.toggle-btn.voice-on {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border-color: rgba(16, 185, 129, 0.45);
+}
+
+.toggle-btn.voice-off {
+  background: rgba(239, 68, 68, 0.14);
+  color: #fca5a5;
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
 /* Cuadrícula 2x2 que ocupa exactamente el resto de la pantalla */
 .cameras-grid {
   flex: 1;
