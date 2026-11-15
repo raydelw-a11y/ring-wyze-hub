@@ -1,0 +1,6 @@
+{
+  "name": "raydel-global-rules",
+  "displayName": "Raydel Global Rules (9-Level Auto-Triage & Render Deploy)",
+  "version": "1.0.0",
+  "description": "Reglas globales obligatorias para todos los proyectos en local y remoto: indicador Actualizado NY (Render), soporte Enter en Acceso Privado, Sistema de Auto-Triaje de 9 Niveles y Narración en Vivo."
+}
