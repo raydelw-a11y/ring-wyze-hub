@@ -21,5 +21,5 @@ Plugin oficial de Antigravity con las reglas globales obligatorias para **todos 
   ```bash
   bash ~/.gemini/config/plugins/raydel-global-rules/scripts/sync-all-repos.sh
   ```
-- **Opcional en remoto para Fase 0 Web (`Niveles 6–9`)**:
+- **Opcional en remoto para Fase 0 Web (`Niveles 6–10`)**:
   - Si deseas conectar una sesión remota al puente Chrome de tu Mac (`:4200` vía túnel HTTPS), define `export HUELLAS_WEB_BRIDGE_URL="https://<tu-tunel>"`.
