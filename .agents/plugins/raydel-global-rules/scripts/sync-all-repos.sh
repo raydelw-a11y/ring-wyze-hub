@@ -45,6 +45,9 @@ SYNCED_NONGIT=0
 for repo in "${CANDIDATES[@]}"; do
   name="$(basename "$repo")"
   target="${repo}/.agents/plugins/raydel-global-rules"
+  if [ -d "${target}" ] && [ "$(cd "${target}" 2>/dev/null && pwd)" = "${GLOBAL_PLUGIN_DIR}" ]; then
+    continue
+  fi
   mkdir -p "${target}/rules" "${target}/scripts"
   cp "${GLOBAL_PLUGIN_DIR}/plugin.json" "${target}/plugin.json"
   cp "${GLOBAL_PLUGIN_DIR}/rules/AGENTS.md" "${target}/rules/AGENTS.md"
